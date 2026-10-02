@@ -1,0 +1,680 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no">
+<title>Trump Runner</title>
+<script src="https://telegram.org/js/telegram-web-app.js"></script>
+<style>
+  html, body {
+    margin: 0;
+    height: 100%;
+    overflow: hidden;
+    background: #8fd4ff;
+    touch-action: none;
+    user-select: none;
+    -webkit-user-select: none;
+    font-family: "Trebuchet MS", "Segoe UI", sans-serif;
+  }
+  canvas {
+    display: block;
+    width: 100%;
+    height: 100%;
+  }
+  .overlay {
+    position: fixed;
+    inset: 0;
+    display: none;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    text-align: center;
+    padding: 24px;
+    box-sizing: border-box;
+    pointer-events: none;
+  }
+  .overlay.show {
+    display: flex;
+    justify-content: flex-start;
+    padding-top: 7vh;
+    pointer-events: auto;
+  }
+  h1 {
+    margin: 0 0 8px;
+    font-size: clamp(36px, 9vw, 64px);
+    letter-spacing: 1px;
+    color: #ffe14a;
+    text-shadow:
+      0 3px 0 #0b2a6b,
+      0 6px 0 #071a44,
+      0 10px 18px rgba(0, 0, 0, 0.25);
+  }
+  .sub {
+    margin: 0;
+    font-size: clamp(20px, 5vw, 32px);
+    font-weight: 800;
+    color: #fff;
+    text-shadow: 0 2px 0 #0b2a6b, 0 4px 10px rgba(0, 0, 0, 0.35);
+  }
+  .hint {
+    margin: 14px 0 0;
+    max-width: 420px;
+    color: #08305f;
+    font-weight: 700;
+    font-size: 15px;
+    line-height: 1.4;
+    background: rgba(255, 255, 255, 0.72);
+    border-radius: 14px;
+    padding: 10px 14px;
+  }
+  #loading {
+    color: #08305f;
+    font-weight: 800;
+    font-size: 22px;
+  }
+  #gameover h1 { font-size: clamp(32px, 8vw, 56px); }
+  #final-score {
+    margin: 8px 0 18px;
+    font-size: clamp(22px, 5vw, 34px);
+    font-weight: 800;
+    color: #fff;
+    text-shadow: 0 2px 0 #0b2a6b;
+  }
+  button {
+    appearance: none;
+    border: 3px solid #ffe14a;
+    background: #0b2a6b;
+    color: #fff;
+    font: inherit;
+    font-weight: 800;
+    font-size: 20px;
+    padding: 12px 28px;
+    border-radius: 999px;
+    cursor: pointer;
+    box-shadow: 0 6px 0 #071a44;
+  }
+  button:active { transform: translateY(2px); box-shadow: 0 4px 0 #071a44; }
+</style>
+</head>
+<body>
+<canvas id="game"></canvas>
+<div id="loading" class="overlay show"><p>Loading…</p></div>
+<div id="start" class="overlay">
+  <h1>TRUMP RUNNER</h1>
+  <p class="sub">Tap to Start</p>
+  <p class="hint">Tap or Space to jump. Hold or Down Arrow to duck. Jump the barrels and the camera, and run under rockets.</p>
+</div>
+<div id="gameover" class="overlay">
+  <h1>GAME OVER</h1>
+  <p id="final-score">Score 0</p>
+  <button id="restart" type="button">Play again</button>
+</div>
+<script>
+(function () {
+  const tg = window.Telegram && window.Telegram.WebApp;
+  if (tg) {
+    tg.ready();
+    tg.expand();
+    if (typeof tg.disableVerticalSwipes === "function") tg.disableVerticalSwipes();
+  }
+
+  function hapticJump() {
+    try { tg && tg.HapticFeedback && tg.HapticFeedback.impactOccurred("light"); } catch (e) {}
+  }
+  function hapticDie() {
+    try { tg && tg.HapticFeedback && tg.HapticFeedback.notificationOccurred("error"); } catch (e) {}
+  }
+
+  let audioCtx = null;
+  function unlockAudio() {
+    const AudioCtx = window.AudioContext || window.webkitAudioContext;
+    if (!AudioCtx) return null;
+    if (!audioCtx) audioCtx = new AudioCtx();
+    if (audioCtx.state === "suspended") audioCtx.resume();
+    return audioCtx;
+  }
+
+  function beep(freq, duration, delay) {
+    const ctx = unlockAudio();
+    if (!ctx) return;
+    const start = ctx.currentTime + (delay || 0);
+    const osc = ctx.createOscillator();
+    const gain = ctx.createGain();
+    osc.type = "square";
+    osc.frequency.setValueAtTime(freq, start);
+    gain.gain.setValueAtTime(0.0001, start);
+    gain.gain.exponentialRampToValueAtTime(0.07, start + 0.01);
+    gain.gain.exponentialRampToValueAtTime(0.0001, start + duration);
+    osc.connect(gain);
+    gain.connect(ctx.destination);
+    osc.start(start);
+    osc.stop(start + duration + 0.02);
+  }
+
+  function beepJump() {
+    beep(740, 0.07, 0);
+  }
+
+  function beepDie() {
+    beep(330, 0.12, 0);
+    beep(196, 0.2, 0.13);
+  }
+
+  const canvas = document.getElementById("game");
+  const ctx = canvas.getContext("2d");
+  const loadingEl = document.getElementById("loading");
+  const startEl = document.getElementById("start");
+  const overEl = document.getElementById("gameover");
+  const scoreEl = document.getElementById("final-score");
+  const restartBtn = document.getElementById("restart");
+
+  const SOURCES = {
+    idle: "assets/trump_idle.png",
+    run: "assets/trump_run.png",
+    runA: "assets/run_pass2.png",
+    runB: "assets/run_pass.png",
+    runC: "assets/run_stride.png",
+    jump: "assets/trump_jump.png",
+    duck: "assets/trump_duck.png",
+    camera: "assets/o2_camera.png",
+    rocket: "assets/o3_rocket.png",
+    barrel: "assets/o4_oilbarrell.png"
+  };
+
+  const images = {};
+  let runFrames = null;
+  let state = "loading";
+  let viewW = 1;
+  let viewH = 1;
+  let dpr = 1;
+  let score = 0;
+  let distance = 0;
+  let spawnIn = 1.1;
+  let lastType = "";
+  let pose = "idle";
+  let shake = 0;
+  let runTime = 0;
+  let raf = 0;
+  let lastTs = 0;
+  let ignoreRelease = false;
+
+  const keys = { down: false };
+  let pointerHeld = false;
+  let holdTimer = 0;
+  let holdDuck = false;
+
+  const player = { y: 0, vy: 0, onGround: true };
+  let obstacles = [];
+  let clouds = [];
+
+  function knockOutBlack(img) {
+    const c = document.createElement("canvas");
+    c.width = img.width;
+    c.height = img.height;
+    const g = c.getContext("2d", { willReadFrequently: true });
+    g.drawImage(img, 0, 0);
+    const imageData = g.getImageData(0, 0, c.width, c.height);
+    const d = imageData.data;
+    const w = c.width;
+    const h = c.height;
+    const seen = new Uint8Array(w * h);
+    const stack = [];
+    const dark = (i) => d[i] < 32 && d[i + 1] < 32 && d[i + 2] < 32;
+    function push(x, y) {
+      if (x < 0 || y < 0 || x >= w || y >= h) return;
+      const p = y * w + x;
+      if (seen[p]) return;
+      if (!dark(p * 4)) return;
+      seen[p] = 1;
+      stack.push(p);
+    }
+    for (let x = 0; x < w; x++) { push(x, 0); push(x, h - 1); }
+    for (let y = 0; y < h; y++) { push(0, y); push(w - 1, y); }
+    while (stack.length) {
+      const p = stack.pop();
+      d[p * 4 + 3] = 0;
+      const x = p % w;
+      const y = (p / w) | 0;
+      push(x + 1, y); push(x - 1, y); push(x, y + 1); push(x, y - 1);
+    }
+    g.putImageData(imageData, 0, 0);
+    return c;
+  }
+
+  function loadImages() {
+    const keys = Object.keys(SOURCES);
+    return Promise.all(keys.map((key) => new Promise((resolve, reject) => {
+      const img = new Image();
+      img.onload = () => {
+        images[key] = knockOutBlack(img);
+        resolve();
+      };
+      img.onerror = () => reject(new Error(key));
+      img.src = SOURCES[key];
+    })));
+  }
+
+  function resize() {
+    const prevH = viewH;
+    dpr = Math.min(window.devicePixelRatio || 1, 2);
+    viewW = window.innerWidth;
+    viewH = window.innerHeight;
+    canvas.width = Math.max(1, Math.floor(viewW * dpr));
+    canvas.height = Math.max(1, Math.floor(viewH * dpr));
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    const m = metrics();
+    if (player.onGround || prevH === 1) player.y = m.groundY;
+    else player.y = Math.min(m.groundY, player.y * (viewH / prevH));
+    if (!clouds.length) seedClouds();
+  }
+
+  function metrics() {
+    const drawH = Math.max(96, viewH * 0.30);
+    const drawW = drawH * (508 / 491);
+    const hitH = drawH * 0.66;
+    const groundY = viewH * 0.80;
+    const gravity = drawH * 8.8;
+    const jumpH = drawH * 1.22;
+    const jumpV = -Math.sqrt(2 * gravity * jumpH);
+    const ramp = 1 + Math.min(distance / 2400, 0.85);
+    const speed = viewH * 0.46 * ramp;
+    return { drawH, drawW, hitH, groundY, gravity, jumpV, speed, jumpH };
+  }
+
+  function seedClouds() {
+    clouds = [];
+    for (let i = 0; i < 5; i++) {
+      clouds.push({
+        x: Math.random() * viewW,
+        y: viewH * (0.08 + Math.random() * 0.28),
+        s: 0.6 + Math.random() * 1.1,
+        v: 12 + Math.random() * 22
+      });
+    }
+  }
+
+  function show(el) {
+    loadingEl.classList.remove("show");
+    startEl.classList.remove("show");
+    overEl.classList.remove("show");
+    if (el) el.classList.add("show");
+  }
+
+  function resetRun() {
+    const m = metrics();
+    score = 0;
+    distance = 0;
+    spawnIn = 0.7;
+    lastType = "";
+    shake = 0;
+    runTime = 0;
+    obstacles = [];
+    player.y = m.groundY;
+    player.vy = 0;
+    player.onGround = true;
+    pose = "run";
+    holdDuck = false;
+    keys.down = false;
+  }
+
+  function begin() {
+    if (state === "playing") return;
+    resetRun();
+    state = "playing";
+    unlockAudio();
+    show(null);
+    ignoreRelease = true;
+    holdDuck = false;
+    clearTimeout(holdTimer);
+  }
+
+  function die() {
+    if (state !== "playing") return;
+    state = "dead";
+    shake = 1;
+    hapticDie();
+    beepDie();
+    scoreEl.textContent = "Score " + score;
+    show(overEl);
+  }
+
+  function jump() {
+    if (state !== "playing") return;
+    const m = metrics();
+    if (!player.onGround) return;
+    player.onGround = false;
+    player.vy = m.jumpV;
+    holdDuck = false;
+    hapticJump();
+    beepJump();
+  }
+
+  function isDucking() {
+    return player.onGround && (keys.down || holdDuck);
+  }
+
+  function playerDraw(m) {
+    const ducking = pose === "duck";
+    const h = ducking ? m.drawH * 0.74 : m.drawH;
+    const w = m.drawW * (h / m.drawH);
+    return {
+      x: viewW * 0.18,
+      y: player.y - h,
+      w,
+      h
+    };
+  }
+
+  function playerBox(m) {
+    const h = m.drawH;
+    const w = m.drawW;
+    const y0 = player.y - h;
+    const x0 = viewW * 0.18;
+    const feet = y0 + h * (458 / 491);
+    const head = y0 + h * (78 / 491);
+    const x = x0 + w * (158 / 508);
+    const bw = w * ((365 - 158) / 508);
+    let bh = feet - head;
+    let by = head;
+    if (isDucking()) {
+      bh *= 0.5;
+      by = feet - bh;
+    }
+    return { x, y: by, w: bw, h: bh };
+  }
+
+  function obstacleGeom(o, m) {
+    const x = o.x;
+    const H = m.drawH;
+    if (o.type === "barrel") {
+      const dh = H * 0.56;
+      const dw = dh * (508 / 491);
+      const y = m.groundY - dh * (435 / 491);
+      const hitH = H * 0.48;
+      return {
+        sprite: images.barrel, x, y, w: dw, h: dh,
+        groundShadow: dw * 0.34,
+        hits: [{
+          x: x + dw * (118 / 508),
+          y: m.groundY - hitH,
+          w: dw * (220 / 508),
+          h: hitH
+        }]
+      };
+    }
+    if (o.type === "rocket") {
+      const dw = H * 1.02;
+      const dh = H * 0.42;
+      const y = m.groundY - H * 0.96 - dh;
+      return {
+        sprite: images.rocket,
+        sx: 16, sy: 162, sw: 476, sh: 165,
+        x, y, w: dw, h: dh,
+        groundShadow: dw * 0.22,
+        hits: [{ x: x + dw * 0.08, y: y + dh * 0.08, w: dw * 0.78, h: dh * 0.82 }]
+      };
+    }
+    if (o.type === "camera") {
+      const dh = H * 0.58;
+      const dw = dh * (508 / 491);
+      const y = m.groundY - dh * (457 / 491);
+      const hitH = H * 0.48;
+      return {
+        sprite: images.camera, x, y, w: dw, h: dh,
+        groundShadow: dw * 0.2,
+        hits: [{
+          x: x + dw * 0.22,
+          y: m.groundY - hitH,
+          w: dw * 0.56,
+          h: hitH
+        }]
+      };
+    }
+    return null;
+  }
+
+  function hitTest(a, b) {
+    return a.x < b.x + b.w && a.x + a.w > b.x && a.y < b.y + b.h && a.y + a.h > b.y;
+  }
+
+  function spawnObstacle() {
+    const roll = ["barrel", "rocket", "camera"];
+    let type = roll[(Math.random() * roll.length) | 0];
+    if (type === lastType) type = roll[(roll.indexOf(type) + 1 + ((Math.random() * 2) | 0)) % roll.length];
+    lastType = type;
+    obstacles.push({
+      type,
+      x: viewW + 30,
+      phase: Math.random() * Math.PI * 2
+    });
+  }
+
+  function update(dt) {
+    const m = metrics();
+    if (shake > 0) shake = Math.max(0, shake - dt * 2.4);
+
+    if (state === "playing") {
+      runTime += dt;
+      distance += m.speed * dt;
+      score = Math.floor(distance / 28);
+      pose = !player.onGround ? "jump" : isDucking() ? "duck" : "run";
+      player.vy += m.gravity * dt;
+      player.y += player.vy * dt;
+      if (player.y >= m.groundY) {
+        player.y = m.groundY;
+        player.vy = 0;
+        player.onGround = true;
+      }
+
+      spawnIn -= dt;
+      if (spawnIn <= 0) {
+        spawnObstacle();
+        const gap = Math.max(0.85, 1.55 - distance / 9000);
+        spawnIn = gap + Math.random() * 0.35;
+      }
+
+      const box = playerBox(m);
+      for (let i = obstacles.length - 1; i >= 0; i--) {
+        const o = obstacles[i];
+        o.x -= m.speed * dt;
+        const g = obstacleGeom(o, m);
+        if (!g) {
+          obstacles.splice(i, 1);
+          continue;
+        }
+        if (o.x + g.w < -40) {
+          obstacles.splice(i, 1);
+          continue;
+        }
+        for (let h = 0; h < g.hits.length; h++) {
+          if (hitTest(box, g.hits[h])) {
+            die();
+            return;
+          }
+        }
+      }
+    }
+
+    for (let i = 0; i < clouds.length; i++) {
+      clouds[i].x -= clouds[i].v * dt * (state === "playing" ? 1 : 0.35);
+      if (clouds[i].x < -160) clouds[i].x = viewW + 40 + Math.random() * 80;
+    }
+  }
+
+  function drawCloud(c) {
+    ctx.fillStyle = "rgba(255,255,255,0.92)";
+    ctx.beginPath();
+    ctx.ellipse(c.x, c.y, 36 * c.s, 18 * c.s, 0, 0, Math.PI * 2);
+    ctx.ellipse(c.x + 28 * c.s, c.y + 4, 28 * c.s, 16 * c.s, 0, 0, Math.PI * 2);
+    ctx.ellipse(c.x - 26 * c.s, c.y + 6, 24 * c.s, 14 * c.s, 0, 0, Math.PI * 2);
+    ctx.fill();
+  }
+
+  function drawBackground(m) {
+    const sky = ctx.createLinearGradient(0, 0, 0, m.groundY);
+    sky.addColorStop(0, "#8fd4ff");
+    sky.addColorStop(1, "#e7f7ff");
+    ctx.fillStyle = sky;
+    ctx.fillRect(0, 0, viewW, viewH);
+
+    for (let i = 0; i < clouds.length; i++) drawCloud(clouds[i]);
+
+    const scroll = distance;
+    ctx.fillStyle = "#2f9a3a";
+    ctx.fillRect(0, m.groundY, viewW, viewH - m.groundY);
+    ctx.fillStyle = "#38b047";
+    const stripe = 48;
+    const offset = -((scroll * 0.5) % stripe);
+    for (let x = offset; x < viewW; x += stripe) {
+      ctx.fillRect(x, m.groundY, stripe * 0.5, 16);
+    }
+    ctx.fillStyle = "#237332";
+    ctx.fillRect(0, m.groundY, viewW, 6);
+
+    ctx.fillStyle = "rgba(255,255,255,0.8)";
+    const tick = 90;
+    const tickOff = -(scroll % tick);
+    for (let x = tickOff; x < viewW; x += tick) {
+      ctx.fillRect(x, m.groundY + 22, 18, 4);
+    }
+  }
+
+  function drawPlayer(m) {
+    const d = playerDraw(m);
+    if (state === "ready") {
+      ctx.drawImage(images.idle, d.x, d.y, d.w, d.h);
+      return;
+    }
+    if (pose === "run" && runFrames && state === "playing") {
+      const frame = Math.floor(runTime * 8) % runFrames.length;
+      ctx.drawImage(runFrames[frame], d.x, d.y, d.w, d.h);
+      return;
+    }
+    ctx.drawImage(images[pose] || images.run, d.x, d.y, d.w, d.h);
+  }
+
+  function drawHud() {
+    ctx.fillStyle = "#fff";
+    ctx.strokeStyle = "#0b2a6b";
+    ctx.lineWidth = 5;
+    ctx.font = "800 28px Trebuchet MS, Segoe UI, sans-serif";
+    ctx.textAlign = "left";
+    ctx.textBaseline = "top";
+    const label = String(score);
+    ctx.strokeText(label, 16, 14);
+    ctx.fillText(label, 16, 14);
+  }
+
+  function frame(ts) {
+    if (!lastTs) lastTs = ts;
+    let dt = (ts - lastTs) / 1000;
+    lastTs = ts;
+    if (dt > 0.05) dt = 0.05;
+
+    if (state !== "loading") update(dt);
+    const m = metrics();
+
+    ctx.save();
+    if (shake > 0 && state === "dead") {
+      const mag = shake * 7;
+      ctx.translate((Math.random() - 0.5) * mag, (Math.random() - 0.5) * mag);
+    }
+    drawBackground(m);
+
+    for (let i = 0; i < obstacles.length; i++) {
+      const g = obstacleGeom(obstacles[i], m);
+      if (!g) continue;
+      if (g.groundShadow) {
+        ctx.fillStyle = "rgba(24, 64, 28, 0.30)";
+        ctx.beginPath();
+        ctx.ellipse(g.x + g.w * 0.5, m.groundY - 2, g.groundShadow, 6, 0, 0, Math.PI * 2);
+        ctx.fill();
+      }
+      ctx.save();
+      if (g.rot || g.squashX) {
+        const cx = g.x + g.w / 2;
+        const cy = g.y + g.h / 2;
+        ctx.translate(cx, cy);
+        if (g.rot) ctx.rotate(g.rot);
+        ctx.scale(g.squashX || 1, g.squashY || 1);
+        ctx.translate(-g.w / 2, -g.h / 2);
+        ctx.drawImage(g.sprite, g.sx, g.sy, g.sw, g.sh, 0, 0, g.w, g.h);
+      } else if (g.sx != null) {
+        ctx.drawImage(g.sprite, g.sx, g.sy, g.sw, g.sh, g.x, g.y, g.w, g.h);
+      } else {
+        ctx.drawImage(g.sprite, g.x, g.y, g.w, g.h);
+      }
+      ctx.restore();
+    }
+
+    if (state === "ready" || state === "playing" || state === "dead") drawPlayer(m);
+    if (state === "playing" || state === "dead") drawHud();
+    ctx.restore();
+
+    raf = requestAnimationFrame(frame);
+  }
+
+  function onPointerDown(e) {
+    if (e.target === restartBtn) return;
+    if (e.cancelable) e.preventDefault();
+    if (state === "ready") { begin(); return; }
+    if (state === "dead") return;
+    if (state !== "playing") return;
+    pointerHeld = true;
+    holdDuck = false;
+    clearTimeout(holdTimer);
+    holdTimer = setTimeout(() => {
+      if (pointerHeld && state === "playing") holdDuck = true;
+    }, 140);
+  }
+
+  function onPointerUp(e) {
+    if (e.target === restartBtn) return;
+    const wasHeld = pointerHeld;
+    pointerHeld = false;
+    clearTimeout(holdTimer);
+    if (ignoreRelease) { ignoreRelease = false; holdDuck = false; return; }
+    if (state === "playing" && wasHeld && !holdDuck) jump();
+    holdDuck = false;
+  }
+
+  window.addEventListener("pointerdown", onPointerDown, { passive: false });
+  window.addEventListener("pointerup", onPointerUp);
+  window.addEventListener("pointercancel", onPointerUp);
+  window.addEventListener("keydown", (e) => {
+    if (e.code === "Space") {
+      e.preventDefault();
+      if (e.repeat) return;
+      if (state === "ready") begin();
+      else if (state === "dead") begin();
+      else jump();
+    } else if (e.code === "ArrowDown") {
+      e.preventDefault();
+      keys.down = true;
+    }
+  });
+  window.addEventListener("keyup", (e) => {
+    if (e.code === "ArrowDown") keys.down = false;
+  });
+  window.addEventListener("resize", resize);
+  restartBtn.addEventListener("click", (e) => {
+    e.stopPropagation();
+    begin();
+  });
+
+  resize();
+  loadImages().then(() => {
+    runFrames = [images.runA, images.runB, images.runC];
+    state = "ready";
+    player.y = metrics().groundY;
+    show(startEl);
+    cancelAnimationFrame(raf);
+    lastTs = 0;
+    raf = requestAnimationFrame(frame);
+  }).catch(() => {
+    loadingEl.textContent = "Could not load images";
+  });
+})();
+</script>
+</body>
+</html>
