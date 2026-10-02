@@ -9,6 +9,7 @@
   html, body {
     margin: 0;
     height: 100%;
+    height: 100dvh;
     overflow: hidden;
     background: #8fd4ff;
     touch-action: none;
@@ -102,7 +103,7 @@
 <div id="start" class="overlay">
   <h1>TRUMP RUNNER</h1>
   <p class="sub">Tap to Start</p>
-  <p class="hint">Tap or Space to jump. Hold or Down Arrow to duck. Jump the barrels and the camera, and run under rockets.</p>
+  <p class="hint">Tap anywhere to jump. Down Arrow ducks. Jump the barrels and the camera, and run under rockets.</p>
 </div>
 <div id="gameover" class="overlay">
   <h1>GAME OVER</h1>
@@ -257,8 +258,10 @@
   function resize() {
     const prevH = viewH;
     dpr = Math.min(window.devicePixelRatio || 1, 2);
-    viewW = window.innerWidth;
-    viewH = window.innerHeight;
+    const vv = window.visualViewport;
+    viewW = vv ? vv.width : window.innerWidth;
+    viewH = vv ? vv.height : window.innerHeight;
+    if (tg && tg.viewportStableHeight) viewH = Math.min(viewH, tg.viewportStableHeight);
     canvas.width = Math.max(1, Math.floor(viewW * dpr));
     canvas.height = Math.max(1, Math.floor(viewH * dpr));
     ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
@@ -269,16 +272,22 @@
   }
 
   function metrics() {
-    const drawH = Math.max(96, viewH * 0.30);
-    const drawW = drawH * (508 / 491);
+    const portrait = viewW < 820;
+    const aspect = 508 / 491;
+    let drawH = viewH * (portrait ? 0.16 : 0.24);
+    const widthCap = viewW * (portrait ? 0.20 : 0.16);
+    if (drawH * aspect > widthCap) drawH = widthCap / aspect;
+    drawH = Math.max(70, Math.min(drawH, viewH * 0.26));
+    const drawW = drawH * aspect;
     const hitH = drawH * 0.66;
-    const groundY = viewH * 0.80;
+    const groundY = viewH * (portrait ? 0.78 : 0.80);
     const gravity = drawH * 8.8;
     const jumpH = drawH * 1.22;
     const jumpV = -Math.sqrt(2 * gravity * jumpH);
     const ramp = 1 + Math.min(distance / 2400, 0.85);
-    const speed = viewH * 0.46 * ramp;
-    return { drawH, drawW, hitH, groundY, gravity, jumpV, speed, jumpH };
+    const lead = Math.max(viewW * 0.62, 160);
+    const speed = (lead / 1.9) * ramp;
+    return { drawH, drawW, hitH, groundY, gravity, jumpV, speed, jumpH, portrait };
   }
 
   function seedClouds() {
@@ -358,7 +367,7 @@
     const h = ducking ? m.drawH * 0.74 : m.drawH;
     const w = m.drawW * (h / m.drawH);
     return {
-      x: viewW * 0.18,
+      x: Math.max(10, viewW * 0.07),
       y: player.y - h,
       w,
       h
@@ -369,7 +378,7 @@
     const h = m.drawH;
     const w = m.drawW;
     const y0 = player.y - h;
-    const x0 = viewW * 0.18;
+    const x0 = Math.max(10, viewW * 0.07);
     const feet = y0 + h * (458 / 491);
     const head = y0 + h * (78 / 491);
     const x = x0 + w * (158 / 508);
@@ -469,7 +478,7 @@
       spawnIn -= dt;
       if (spawnIn <= 0) {
         spawnObstacle();
-        const gap = Math.max(0.85, 1.55 - distance / 9000);
+        const gap = Math.max(metrics().portrait ? 1.45 : 0.9, 1.7 - distance / 9000);
         spawnIn = gap + Math.random() * 0.35;
       }
 
@@ -620,21 +629,12 @@
     if (state === "ready") { begin(); return; }
     if (state === "dead") return;
     if (state !== "playing") return;
-    pointerHeld = true;
-    holdDuck = false;
-    clearTimeout(holdTimer);
-    holdTimer = setTimeout(() => {
-      if (pointerHeld && state === "playing") holdDuck = true;
-    }, 140);
+    jump();
   }
 
   function onPointerUp(e) {
     if (e.target === restartBtn) return;
-    const wasHeld = pointerHeld;
     pointerHeld = false;
-    clearTimeout(holdTimer);
-    if (ignoreRelease) { ignoreRelease = false; holdDuck = false; return; }
-    if (state === "playing" && wasHeld && !holdDuck) jump();
     holdDuck = false;
   }
 
@@ -657,6 +657,8 @@
     if (e.code === "ArrowDown") keys.down = false;
   });
   window.addEventListener("resize", resize);
+  if (window.visualViewport) window.visualViewport.addEventListener("resize", resize);
+  if (tg && typeof tg.onEvent === "function") tg.onEvent("viewportChanged", resize);
   restartBtn.addEventListener("click", (e) => {
     e.stopPropagation();
     begin();
